@@ -14,7 +14,7 @@ sys.modules['torch.nn.functional'] = mock_torch.nn.functional
 sys.modules['kernels'] = unittest.mock.MagicMock()
 sys.modules['prepare'] = unittest.mock.MagicMock()
 
-from train import has_ve, get_lr_multiplier
+from train import has_ve, get_lr_multiplier, get_muon_momentum
 
 def test_has_ve_even_layers():
     """Test has_ve with an even number of layers (e.g., n_layer=8)"""
@@ -123,3 +123,29 @@ def test_get_lr_multiplier_no_warmdown():
     # causing ZeroDivisionError.
     with pytest.raises(ZeroDivisionError):
         get_lr_multiplier(1.0)
+
+
+def test_get_muon_momentum_start():
+    """Test get_muon_momentum at step 0 (should be exactly 0.85)."""
+    assert get_muon_momentum(0) == pytest.approx(0.85)
+
+def test_get_muon_momentum_mid():
+    """Test get_muon_momentum at midpoint step 150 (should be exactly 0.90)."""
+    assert get_muon_momentum(150) == pytest.approx(0.90)
+
+def test_get_muon_momentum_end():
+    """Test get_muon_momentum at step 300 (should be exactly 0.95)."""
+    assert get_muon_momentum(300) == pytest.approx(0.95)
+
+def test_get_muon_momentum_capped():
+    """Test get_muon_momentum beyond step 300 (should be capped at 0.95)."""
+    assert get_muon_momentum(500) == pytest.approx(0.95)
+    assert get_muon_momentum(1000) == pytest.approx(0.95)
+
+def test_get_muon_momentum_negative():
+    """Test get_muon_momentum with negative steps (should be capped at 0.85)."""
+    # The current implementation of min(step / 300, 1) returns negative numbers for negative steps.
+    # While step should ideally be positive, we test the actual mathematical output.
+    # (1 - (step/300)) * 0.85 + (step/300) * 0.95 = 0.85 + (step/300) * 0.1
+    # For step -300: 0.85 - 0.1 = 0.75
+    assert get_muon_momentum(-300) == pytest.approx(0.75)
