@@ -279,10 +279,9 @@ class Tokenizer:
 
 
 def get_token_bytes(device="cpu"):
-    path = os.path.join(TOKENIZER_DIR, "token_bytes.json")
-    with open(path, "r") as f:
-        token_bytes_list = json.load(f)
-    return torch.tensor(token_bytes_list, dtype=torch.int32, device=device)
+    path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
+    with open(path, "rb") as f:
+        return torch.load(f, map_location=device)
 
 
 def _document_batches(split, tokenizer_batch_size=128):
