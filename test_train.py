@@ -14,7 +14,7 @@ sys.modules['torch.nn.functional'] = mock_torch.nn.functional
 sys.modules['kernels'] = unittest.mock.MagicMock()
 sys.modules['prepare'] = unittest.mock.MagicMock()
 
-from train import has_ve, get_lr_multiplier, get_muon_momentum
+from train import has_ve, get_lr_multiplier, get_muon_momentum, get_weight_decay
 
 def test_has_ve_even_layers():
     """Test has_ve with an even number of layers (e.g., n_layer=8)"""
@@ -149,3 +149,25 @@ def test_get_muon_momentum_negative():
     # (1 - (step/300)) * 0.85 + (step/300) * 0.95 = 0.85 + (step/300) * 0.1
     # For step -300: 0.85 - 0.1 = 0.75
     assert get_muon_momentum(-300) == pytest.approx(0.75)
+
+
+@unittest.mock.patch('train.WEIGHT_DECAY', 0.2)
+def test_get_weight_decay_start():
+    """Test get_weight_decay at progress 0.0 (should be exactly WEIGHT_DECAY)."""
+    assert get_weight_decay(0.0) == pytest.approx(0.2)
+
+@unittest.mock.patch('train.WEIGHT_DECAY', 0.2)
+def test_get_weight_decay_mid():
+    """Test get_weight_decay at progress 0.5 (should be half of WEIGHT_DECAY)."""
+    assert get_weight_decay(0.5) == pytest.approx(0.1)
+
+@unittest.mock.patch('train.WEIGHT_DECAY', 0.2)
+def test_get_weight_decay_end():
+    """Test get_weight_decay at progress 1.0 (should be exactly 0.0)."""
+    assert get_weight_decay(1.0) == pytest.approx(0.0)
+
+@unittest.mock.patch('train.WEIGHT_DECAY', 0.2)
+def test_get_weight_decay_out_of_bounds():
+    """Test get_weight_decay with out of bounds progress to document behavior."""
+    assert get_weight_decay(1.5) == pytest.approx(-0.1)
+    assert get_weight_decay(-0.5) == pytest.approx(0.3)
