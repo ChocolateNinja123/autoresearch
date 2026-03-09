@@ -306,10 +306,10 @@ def _document_batches(split, tokenizer_batch_size=128):
         epoch += 1
 
 
-def _fill_row_best_fit(row_tensor, doc_buffer, row_capacity, buffer_size, refill_fn):
+def _fill_row_best_fit(row_tensor, doc_buffer, doc_lens, row_capacity, buffer_size, refill_fn):
     """
     Fills a single row buffer using best-fit document packing.
-    Mutates row_tensor and doc_buffer in-place.
+    Mutates row_tensor, doc_buffer, and doc_lens in-place.
     """
     pos = 0
     while pos < row_capacity:
@@ -321,8 +321,7 @@ def _fill_row_best_fit(row_tensor, doc_buffer, row_capacity, buffer_size, refill
         # Find largest doc that fits entirely
         best_idx = -1
         best_len = 0
-        for i, doc in enumerate(doc_buffer):
-            doc_len = len(doc)
+        for i, doc_len in enumerate(doc_lens):
             if doc_len <= remaining and doc_len > best_len:
                 best_idx = i
                 best_len = doc_len
@@ -331,14 +330,18 @@ def _fill_row_best_fit(row_tensor, doc_buffer, row_capacity, buffer_size, refill
             doc = doc_buffer[best_idx]
             doc_buffer[best_idx] = doc_buffer[-1]
             doc_buffer.pop()
-            row_tensor[pos:pos + len(doc)] = torch.tensor(doc, dtype=torch.long)
-            pos += len(doc)
+            doc_lens[best_idx] = doc_lens[-1]
+            doc_lens.pop()
+            row_tensor[pos:pos + best_len] = torch.tensor(doc, dtype=torch.long)
+            pos += best_len
         else:
             # No doc fits — crop shortest to fill remaining
-            shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
+            shortest_idx = min(range(len(doc_lens)), key=lambda i: doc_lens[i])
             doc = doc_buffer[shortest_idx]
             doc_buffer[shortest_idx] = doc_buffer[-1]
             doc_buffer.pop()
+            doc_lens[shortest_idx] = doc_lens[-1]
+            doc_lens.pop()
             row_tensor[pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
             pos += remaining
 
@@ -355,6 +358,7 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
     batches = _document_batches(split)
     bos_token = tokenizer.get_bos_token_id()
     doc_buffer = []
+    doc_lens = []
     epoch = 1
 
     def refill_buffer():
@@ -362,6 +366,7 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
         doc_batch, epoch = next(batches)
         token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
         doc_buffer.extend(token_lists)
+        doc_lens.extend(len(t) for t in token_lists)
 
     # Pre-allocate buffers: [inputs (B*T) | targets (B*T)]
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
@@ -374,7 +379,7 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
 
     while True:
         for row_idx in range(B):
-            _fill_row_best_fit(row_buffer[row_idx], doc_buffer, row_capacity, buffer_size, refill_buffer)
+            _fill_row_best_fit(row_buffer[row_idx], doc_buffer, doc_lens, row_capacity, buffer_size, refill_buffer)
 
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
