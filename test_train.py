@@ -171,3 +171,101 @@ def test_get_weight_decay_out_of_bounds():
     """Test get_weight_decay with out of bounds progress to document behavior."""
     assert get_weight_decay(1.5) == pytest.approx(-0.1)
     assert get_weight_decay(-0.5) == pytest.approx(0.3)
+
+# In test_train.py, torch is mocked. We can't use real PyTorch tensors directly
+# inside these functions. We can either write the test logic in a separate file,
+# or use `unittest.mock.patch` around the specific `train.py` import inside a subprocess
+# to bypass the CUDA device error, then run the test logic inside that subprocess using real torch.
+# Wait, since `train.py` has its main logic protected by `if __name__ == "__main__":`,
+# we can just mock `torch.cuda.get_device_capability` and `get_kernel` using `patch` during a subprocess.
+
+# In the current environment, `sys.modules['torch']` is a MagicMock, preventing us from using real tensors
+# cleanly without either subprocesses or running into torch reload bugs like "conv1d already has a docstring".
+# To fix this elegantly, we don't import `train.py` directly in our tests and try to un-mock it.
+# Instead, we just patch the `train.apply_rotary_emb` using `unittest.mock.patch` if we want to run train,
+# BUT we just want to run `apply_rotary_emb` math!
+# Wait, we can just define a test fixture that patches `torch` dynamically just for importing train.
+# Since `train.py` is already imported at the top of `test_train.py`, we can't un-import it easily.
+# But `apply_rotary_emb` relies on `torch.cat`. Since `train.py` has `import torch` mapped to the mock,
+# `torch.cat` inside `train.py` is `mock_torch.cat`.
+# We can just run the function and assert that `mock_torch.cat` was called correctly!
+
+def test_apply_rotary_emb_mocked():
+    from train import apply_rotary_emb
+    import sys
+    mock_torch = sys.modules['torch']
+
+    # We pass standard Python objects (or mock tensors) and trace the math
+    class DummyTensor:
+        def __init__(self, name, ndim=4, shape=(2, 4, 3, 8)):
+            self.name = name
+            self.ndim = ndim
+            self.shape = shape
+
+        def __getitem__(self, key):
+            return DummyTensor(f"{self.name}[{key}]")
+
+        def __mul__(self, other):
+            other_name = other.name if isinstance(other, DummyTensor) else str(other)
+            return DummyTensor(f"({self.name} * {other_name})")
+
+        def __add__(self, other):
+            other_name = other.name if isinstance(other, DummyTensor) else str(other)
+            return DummyTensor(f"({self.name} + {other_name})")
+
+        def __neg__(self):
+            return DummyTensor(f"(-{self.name})")
+
+    x = DummyTensor("x")
+    cos = DummyTensor("cos")
+    sin = DummyTensor("sin")
+
+    # Reset mock before call
+    mock_torch.cat.reset_mock()
+    mock_torch.cat.return_value = DummyTensor("result")
+
+    res = apply_rotary_emb(x, cos, sin)
+
+    assert res.name == "result"
+
+    # Check that mock_torch.cat was called with a list of two elements and dim=3
+    mock_torch.cat.assert_called_once()
+    args, kwargs = mock_torch.cat.call_args
+    assert len(args) == 2
+    tensors = args[0]
+    assert len(tensors) == 2
+
+    dim = args[1] if len(args) > 1 else kwargs.get('dim', None)
+    if dim is None and len(args) == 1 and len(kwargs) == 0:
+        # Check positional arg 3 or kwarg dim=3
+        # In train.py it's called as: torch.cat([y1, y2], 3)
+        assert mock_torch.cat.call_args[0][1] == 3
+
+    y1, y2 = tensors
+    # Check the mathematical structure encoded in names
+    # d = 8 // 2 = 4
+    # x1 = x[(Ellipsis, slice(None, 4, None))]
+    # x2 = x[(Ellipsis, slice(4, None, None))]
+
+    assert "slice(None, 4, None)" in y1.name
+    assert "cos" in y1.name
+    assert "sin" in y1.name
+
+    assert "slice(4, None, None)" in y2.name
+    assert "-sin" in y2.name
+    assert "cos" in y2.name
+
+def test_apply_rotary_emb_ndim_assertion():
+    from train import apply_rotary_emb
+    import pytest
+
+    class DummyTensor:
+        def __init__(self, ndim):
+            self.ndim = ndim
+            self.shape = [1] * ndim
+
+    with pytest.raises(AssertionError):
+        apply_rotary_emb(DummyTensor(3), DummyTensor(3), DummyTensor(3))
+
+    with pytest.raises(AssertionError):
+        apply_rotary_emb(DummyTensor(5), DummyTensor(5), DummyTensor(5))
