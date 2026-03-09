@@ -307,7 +307,9 @@ polar_express_coeffs = [
 ]
 
 @torch.compile(dynamic=False, fullgraph=True)
-def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
+def adamw_step_fused(p, grad, buffers, hyperparams):
+    exp_avg, exp_avg_sq = buffers
+    step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t = hyperparams
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
     exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
@@ -318,8 +320,9 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     p.add_(exp_avg / denom, alpha=-step_size)
 
 @torch.compile(dynamic=False, fullgraph=True)
-def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
-                    momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
+def muon_step_fused(stacked_grads, stacked_params, buffers, hyperparams):
+    momentum_buffer, second_momentum_buffer = buffers
+    momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim = hyperparams
     # Nesterov momentum
     momentum = momentum_t.to(stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
@@ -391,9 +394,11 @@ class MuonAdamW(torch.optim.Optimizer):
             self._adamw_beta2_t.fill_(group['betas'][1])
             self._adamw_eps_t.fill_(group['eps'])
             self._adamw_wd_t.fill_(group['weight_decay'])
-            adamw_step_fused(p, grad, state['exp_avg'], state['exp_avg_sq'],
-                            self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t,
-                            self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t)
+            adamw_step_fused(
+                p, grad,
+                (state['exp_avg'], state['exp_avg_sq']),
+                (self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t, self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t)
+            )
 
     def _step_muon(self, group):
         params = group['params']
@@ -415,10 +420,11 @@ class MuonAdamW(torch.optim.Optimizer):
         self._muon_beta2_t.fill_(group["beta2"] if group["beta2"] is not None else 0.0)
         self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1])**0.5)
         self._muon_wd_t.fill_(group["weight_decay"])
-        muon_step_fused(stacked_grads, stacked_params,
-                        state["momentum_buffer"], state["second_momentum_buffer"],
-                        self._muon_momentum_t, self._muon_lr_t, self._muon_wd_t,
-                        self._muon_beta2_t, group["ns_steps"], red_dim)
+        muon_step_fused(
+            stacked_grads, stacked_params,
+            (state["momentum_buffer"], state["second_momentum_buffer"]),
+            (self._muon_momentum_t, self._muon_lr_t, self._muon_wd_t, self._muon_beta2_t, group["ns_steps"], red_dim)
+        )
         torch._foreach_copy_(params, list(stacked_params.unbind(0)))
 
     @torch.no_grad()
