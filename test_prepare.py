@@ -240,3 +240,111 @@ def test_download_single_shard_failure(mock_sleep, tmp_path):
             # Ensure files are cleaned up
             assert not filepath.exists()
             assert not (tmp_path / (filename + ".tmp")).exists()
+
+import math
+
+def test_evaluate_bpb_normal():
+    # Setup mocks
+    model = MagicMock()
+    # model returns a tensor of losses
+    # Shape: (B, T) -> (2, 4)
+    model.return_value = torch.tensor([
+        [1.0, 2.0, 3.0, 4.0],
+        [5.0, 6.0, 7.0, 8.0]
+    ])
+
+    tokenizer = MagicMock()
+
+    # x and y will be shape (2, 4)
+    x = torch.zeros((2, 4), dtype=torch.long)
+    y = torch.tensor([
+        [10, 11, 12, 13],
+        [14, 15, 16, 17]
+    ], dtype=torch.long)
+
+    # Token bytes lookup
+    # 0 byte length for tokens 10, 11
+    # 1 byte length for tokens 12, 13
+    # 2 byte length for tokens 14, 15
+    # 3 byte length for tokens 16, 17
+    # Note: Special tokens have byte length 0 and should be excluded from both sums
+    token_bytes = torch.zeros(100, dtype=torch.int32)
+    token_bytes[10] = 0
+    token_bytes[11] = 0
+    token_bytes[12] = 1
+    token_bytes[13] = 1
+    token_bytes[14] = 2
+    token_bytes[15] = 2
+    token_bytes[16] = 3
+    token_bytes[17] = 3
+
+    # Loss flat: 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+    # Bytes:       0,   0,   1,   1,   2,   2,   3,   3
+    # Masked:          3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+    # Expected total nats: 3+4+5+6+7+8 = 33.0
+    # Expected total bytes: 1+1+2+2+3+3 = 12
+    # Expected BPB: 33.0 / (math.log(2) * 12) = 33.0 / 8.317766 = 3.9674
+
+    # Iterator returning a single batch
+    def dataloader_iter():
+        yield x, y, 1
+
+    val_loader = dataloader_iter()
+
+    with patch("prepare.get_token_bytes", return_value=token_bytes) as mock_get_token_bytes, \
+         patch("prepare.make_dataloader", return_value=val_loader) as mock_make_dataloader, \
+         patch("prepare.EVAL_TOKENS", 8), \
+         patch("prepare.MAX_SEQ_LEN", 4):
+
+        result = prepare.evaluate_bpb(model, tokenizer, batch_size=2)
+
+        expected_nats = 33.0
+        expected_bytes = 12
+        expected_bpb = expected_nats / (math.log(2) * expected_bytes)
+
+        assert math.isclose(result, expected_bpb, rel_tol=1e-5)
+
+        mock_get_token_bytes.assert_called_once_with(device="cuda")
+        mock_make_dataloader.assert_called_once_with(tokenizer, 2, 4, "val")
+        model.assert_called_once_with(x, y, reduction='none')
+
+def test_evaluate_bpb_all_special_tokens():
+    model = MagicMock()
+    model.return_value = torch.tensor([[1.0, 2.0]])
+    tokenizer = MagicMock()
+
+    x = torch.zeros((1, 2), dtype=torch.long)
+    y = torch.tensor([[10, 11]], dtype=torch.long)
+
+    # All special tokens have 0 byte length
+    token_bytes = torch.zeros(100, dtype=torch.int32)
+
+    def dataloader_iter():
+        yield x, y, 1
+
+    val_loader = dataloader_iter()
+
+    with patch("prepare.get_token_bytes", return_value=token_bytes), \
+         patch("prepare.make_dataloader", return_value=val_loader), \
+         patch("prepare.EVAL_TOKENS", 2), \
+         patch("prepare.MAX_SEQ_LEN", 2):
+
+        # When all tokens have 0 byte length, total_bytes is 0
+        # math.log(2) * total_bytes = 0
+        # total_nats / 0 -> ZeroDivisionError
+        with pytest.raises(ZeroDivisionError):
+            prepare.evaluate_bpb(model, tokenizer, batch_size=1)
+
+def test_evaluate_bpb_zero_steps():
+    model = MagicMock()
+    tokenizer = MagicMock()
+
+    with patch("prepare.get_token_bytes", return_value=torch.zeros(100)), \
+         patch("prepare.make_dataloader", return_value=[]), \
+         patch("prepare.EVAL_TOKENS", 1), \
+         patch("prepare.MAX_SEQ_LEN", 2):
+
+        # EVAL_TOKENS // (batch_size * MAX_SEQ_LEN) = 1 // (1 * 2) = 0
+        # loops 0 times -> total_bytes = 0 -> ZeroDivisionError
+        with pytest.raises(ZeroDivisionError):
+            prepare.evaluate_bpb(model, tokenizer, batch_size=1)
