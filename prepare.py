@@ -328,13 +328,17 @@ def _fill_row_best_fit(row_tensor, doc_buffer, row_capacity, buffer_size, refill
                 best_len = doc_len
 
         if best_idx >= 0:
-            doc = doc_buffer.pop(best_idx)
+            doc = doc_buffer[best_idx]
+            doc_buffer[best_idx] = doc_buffer[-1]
+            doc_buffer.pop()
             row_tensor[pos:pos + len(doc)] = torch.tensor(doc, dtype=torch.long)
             pos += len(doc)
         else:
             # No doc fits — crop shortest to fill remaining
             shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-            doc = doc_buffer.pop(shortest_idx)
+            doc = doc_buffer[shortest_idx]
+            doc_buffer[shortest_idx] = doc_buffer[-1]
+            doc_buffer.pop()
             row_tensor[pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
             pos += remaining
 
