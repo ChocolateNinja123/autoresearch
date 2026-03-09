@@ -135,3 +135,108 @@ def test_get_token_bytes_mocked(mock_open, mock_torch_load):
     mock_open.assert_called_once_with(expected_path, "rb")
     mock_torch_load.assert_called_once_with(mock_open.return_value.__enter__(), map_location="cuda")
     assert result == "mock_tensor"
+
+import requests
+from unittest.mock import MagicMock
+
+def test_download_single_shard_exists(tmp_path):
+    """Test when the file already exists, it returns True immediately."""
+    index = 42
+    filename = f"shard_{index:05d}.parquet"
+    filepath = tmp_path / filename
+    filepath.touch()
+
+    with patch("prepare.DATA_DIR", str(tmp_path)):
+        with patch("prepare.requests.get") as mock_get:
+            result = prepare.download_single_shard(index)
+            assert result is True
+            mock_get.assert_not_called()
+
+@patch("prepare.time.sleep")
+def test_download_single_shard_success_first_try(mock_sleep, tmp_path):
+    """Test successful download on the first attempt."""
+    index = 1
+    filename = f"shard_{index:05d}.parquet"
+    filepath = tmp_path / filename
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.iter_content.return_value = [b"chunk1", b"chunk2"]
+
+    with patch("prepare.DATA_DIR", str(tmp_path)):
+        with patch("prepare.requests.get") as mock_get:
+            mock_get.return_value = mock_response
+
+            result = prepare.download_single_shard(index)
+
+            assert result is True
+            assert mock_get.call_count == 1
+            mock_sleep.assert_not_called()
+
+            # Check file contents
+            assert filepath.exists()
+            assert filepath.read_bytes() == b"chunk1chunk2"
+
+            # Ensure tmp file is gone
+            assert not (tmp_path / (filename + ".tmp")).exists()
+
+@patch("prepare.time.sleep")
+def test_download_single_shard_success_after_retries(mock_sleep, tmp_path):
+    """Test successful download after initial failures."""
+    index = 2
+    filename = f"shard_{index:05d}.parquet"
+    filepath = tmp_path / filename
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.iter_content.return_value = [b"success_data"]
+
+    with patch("prepare.DATA_DIR", str(tmp_path)):
+        with patch("prepare.requests.get") as mock_get:
+            # First two raise, third succeeds
+            mock_get.side_effect = [
+                requests.RequestException("Network Error"),
+                IOError("File Error"),
+                mock_response
+            ]
+
+            result = prepare.download_single_shard(index)
+
+            assert result is True
+            assert mock_get.call_count == 3
+
+            # Check sleep was called correctly for attempts 1 and 2
+            assert mock_sleep.call_count == 2
+            mock_sleep.assert_any_call(2)  # attempt 1: 2^1 = 2
+            mock_sleep.assert_any_call(4)  # attempt 2: 2^2 = 4
+
+            # Check file contents
+            assert filepath.exists()
+            assert filepath.read_bytes() == b"success_data"
+
+@patch("prepare.time.sleep")
+def test_download_single_shard_failure(mock_sleep, tmp_path):
+    """Test that it returns False after max_attempts."""
+    index = 3
+    filename = f"shard_{index:05d}.parquet"
+    filepath = tmp_path / filename
+
+    with patch("prepare.DATA_DIR", str(tmp_path)):
+        with patch("prepare.requests.get") as mock_get:
+            mock_get.side_effect = requests.RequestException("Persistent Error")
+
+            result = prepare.download_single_shard(index)
+
+            assert result is False
+            assert mock_get.call_count == 5
+
+            # Check sleep was called correctly
+            assert mock_sleep.call_count == 4
+            mock_sleep.assert_any_call(2)
+            mock_sleep.assert_any_call(4)
+            mock_sleep.assert_any_call(8)
+            mock_sleep.assert_any_call(16)
+
+            # Ensure files are cleaned up
+            assert not filepath.exists()
+            assert not (tmp_path / (filename + ".tmp")).exists()
