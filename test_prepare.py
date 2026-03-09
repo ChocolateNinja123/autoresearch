@@ -85,3 +85,53 @@ def test_list_parquet_files_dir_not_found(mock_listdir):
     with patch("prepare.DATA_DIR", "mock_dir"):
         with pytest.raises(FileNotFoundError):
             prepare.list_parquet_files()
+
+import torch
+
+def test_get_token_bytes_normal(tmp_path):
+    """Test get_token_bytes loads from the correct path and returns a tensor on the correct device."""
+    import torch
+
+    expected_tensor = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device="cpu")
+
+    # Create the token_bytes.pt file in the mocked TOKENIZER_DIR
+    mock_tokenizer_dir = tmp_path / "tokenizer"
+    mock_tokenizer_dir.mkdir()
+    token_bytes_path = mock_tokenizer_dir / "token_bytes.pt"
+
+    torch.save(expected_tensor, token_bytes_path)
+
+    with patch("prepare.TOKENIZER_DIR", str(mock_tokenizer_dir)):
+        result = prepare.get_token_bytes(device="cpu")
+
+        # Verify it returns a torch.Tensor
+        assert isinstance(result, torch.Tensor)
+        # Verify correct dtype
+        assert result.dtype == torch.int32
+        # Verify correct device
+        assert result.device.type == "cpu"
+        # Verify the contents match
+        assert result.tolist() == expected_tensor.tolist()
+
+def test_get_token_bytes_file_not_found(tmp_path):
+    """Test get_token_bytes raises FileNotFoundError if token_bytes.pt is missing."""
+    mock_tokenizer_dir = tmp_path / "tokenizer"
+    mock_tokenizer_dir.mkdir()
+
+    with patch("prepare.TOKENIZER_DIR", str(mock_tokenizer_dir)):
+        with pytest.raises(FileNotFoundError):
+            prepare.get_token_bytes(device="cpu")
+
+@patch("prepare.torch.load")
+@patch("builtins.open")
+def test_get_token_bytes_mocked(mock_open, mock_torch_load):
+    """Test get_token_bytes using mocks to verify internal calls."""
+    mock_torch_load.return_value = "mock_tensor"
+
+    with patch("prepare.TOKENIZER_DIR", "/mock/dir"):
+        result = prepare.get_token_bytes(device="cuda")
+
+    expected_path = os.path.join("/mock/dir", "token_bytes.pt")
+    mock_open.assert_called_once_with(expected_path, "rb")
+    mock_torch_load.assert_called_once_with(mock_open.return_value.__enter__(), map_location="cuda")
+    assert result == "mock_tensor"
