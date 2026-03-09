@@ -135,10 +135,14 @@ class GPT(nn.Module):
         # Value embeddings
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        self.value_embeds = nn.ModuleDict({
-            str(i): nn.Embedding(config.vocab_size, kv_dim)
-            for i in range(config.n_layer) if has_ve(i, config.n_layer)
-        })
+        self.value_embeds = nn.ModuleList()
+        self.layer_to_ve_idx = []
+        for i in range(config.n_layer):
+            if has_ve(i, config.n_layer):
+                self.layer_to_ve_idx.append(len(self.value_embeds))
+                self.value_embeds.append(nn.Embedding(config.vocab_size, kv_dim))
+            else:
+                self.layer_to_ve_idx.append(-1)
         # Rotary embeddings
         self.rotary_seq_len = config.sequence_len * 10
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -164,7 +168,7 @@ class GPT(nn.Module):
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
         # Value embeddings
-        for ve in self.value_embeds.values():
+        for ve in self.value_embeds:
             torch.nn.init.uniform_(ve.weight, -s, s)
         # Gate weights init to zero (sigmoid(0)=0.5, scaled by 2 -> 1.0 = neutral)
         for block in self.transformer.h:
@@ -176,7 +180,7 @@ class GPT(nn.Module):
         self.cos, self.sin = cos, sin
         # Cast embeddings to bf16
         self.transformer.wte.to(dtype=torch.bfloat16)
-        for ve in self.value_embeds.values():
+        for ve in self.value_embeds:
             ve.to(dtype=torch.bfloat16)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
@@ -207,7 +211,7 @@ class GPT(nn.Module):
     def estimate_flops(self):
         """Estimated FLOPs per token (forward + backward)."""
         nparams = sum(p.numel() for p in self.parameters())
-        value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
+        value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds)
         nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel())
         h = self.config.n_head
@@ -274,7 +278,8 @@ class GPT(nn.Module):
         x0 = x
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
+            ve_idx = self.layer_to_ve_idx[i]
+            ve = self.value_embeds[ve_idx](idx) if ve_idx != -1 else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
         x = norm(x)
 
