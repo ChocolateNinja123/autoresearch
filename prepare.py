@@ -139,23 +139,8 @@ def text_iterator(max_chars=1_000_000_000, doc_cap=10_000):
                     return
 
 
-def train_tokenizer():
-    """Train BPE tokenizer using rustbpe, save as JSON."""
-    tokenizer_json = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-    token_bytes_json = os.path.join(TOKENIZER_DIR, "token_bytes.json")
-
-    if os.path.exists(tokenizer_json) and os.path.exists(token_bytes_json):
-        print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
-        return
-
-    os.makedirs(TOKENIZER_DIR, exist_ok=True)
-
-    parquet_files = list_parquet_files()
-    if len(parquet_files) < 2:
-        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
-        sys.exit(1)
-
-    # --- Train with rustbpe ---
+def _train_bpe_tokenizer(tokenizer_json):
+    """Train BPE tokenizer using rustbpe, create tiktoken encoding, and save to JSON."""
     print("Tokenizer: training BPE tokenizer...")
     t0 = time.time()
 
@@ -189,7 +174,11 @@ def train_tokenizer():
     t1 = time.time()
     print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_json}")
 
-    # --- Build token_bytes lookup for BPB evaluation ---
+    return enc
+
+
+def _build_token_bytes_lookup(enc, token_bytes_json):
+    """Build and save token_bytes lookup table for BPB evaluation."""
     print("Tokenizer: building token_bytes lookup...")
     special_set = set(SPECIAL_TOKENS)
     token_bytes_list = []
@@ -199,16 +188,45 @@ def train_tokenizer():
             token_bytes_list.append(0)
         else:
             token_bytes_list.append(len(token_str.encode("utf-8")))
+
     with open(token_bytes_json, "w") as f:
         json.dump(token_bytes_list, f)
     print(f"Tokenizer: saved token_bytes to {token_bytes_json}")
 
-    # Sanity check
+
+def _run_sanity_check(enc):
+    """Run string encode/decode sanity check."""
     test = "Hello world! Numbers: 123. Unicode: 你好"
     encoded = enc.encode_ordinary(test)
     decoded = enc.decode(encoded)
     assert decoded == test, f"Tokenizer roundtrip failed: {test!r} -> {decoded!r}"
     print(f"Tokenizer: sanity check passed (vocab_size={enc.n_vocab})")
+
+
+def train_tokenizer():
+    """Train BPE tokenizer using rustbpe, save as JSON."""
+    tokenizer_json = os.path.join(TOKENIZER_DIR, "tokenizer.json")
+    token_bytes_json = os.path.join(TOKENIZER_DIR, "token_bytes.json")
+
+    if os.path.exists(tokenizer_json) and os.path.exists(token_bytes_json):
+        print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
+        return
+
+    os.makedirs(TOKENIZER_DIR, exist_ok=True)
+
+    parquet_files = list_parquet_files()
+    if len(parquet_files) < 2:
+        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
+        sys.exit(1)
+
+    # --- Train with rustbpe ---
+    enc = _train_bpe_tokenizer(tokenizer_json)
+
+    # --- Build token_bytes lookup for BPB evaluation ---
+    _build_token_bytes_lookup(enc, token_bytes_json)
+
+    # Sanity check
+    _run_sanity_check(enc)
 
 # ---------------------------------------------------------------------------
 # Runtime utilities (imported by train.py)
