@@ -10,6 +10,12 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
 import time
+import os
+import json
+import math
+import argparse
+import shutil
+import datetime
 from dataclasses import dataclass, asdict
 
 import torch
@@ -17,10 +23,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+try:
+    cap = torch.cuda.get_device_capability()
+    # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+    HAS_FA3 = True
+except Exception:
+    fa3 = None
+    HAS_FA3 = False
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -93,8 +104,31 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        y = y.contiguous().view(B, T, -1)
+        if HAS_FA3:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+            y = y.contiguous().view(B, T, -1)
+        else:
+            # Fallback to SDPA
+            q = q.transpose(1, 2)  # (B, n_head, T, head_dim)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+
+            # Expand k and v for GQA if needed
+            if self.n_kv_head < self.n_head:
+                n_rep = self.n_head // self.n_kv_head
+                k = k.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(B, self.n_head, T, self.head_dim)
+                v = v.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(B, self.n_head, T, self.head_dim)
+
+            # Handle window size
+            window_len = window_size[0]
+            if window_len < T and window_len > 0:
+                mask = torch.ones(T, T, dtype=torch.bool, device=q.device).tril(diagonal=0)
+                mask = torch.triu(mask, diagonal=-(window_len - 1))
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            else:
+                y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            y = y.transpose(1, 2).contiguous().view(B, T, -1)
+
         y = self.c_proj(y)
         return y
 
@@ -102,12 +136,14 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        hidden_dim = int(8/3 * config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, 2 * hidden_dim, bias=False)
+        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = F.relu(x).square()
+        x, gate = x.chunk(2, dim=-1)
+        x = F.silu(x) * gate
         x = self.c_proj(x)
         return x
 
@@ -454,12 +490,12 @@ MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
-WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
+WARMUP_RATIO = 0.05     # fraction of time budget for LR warmup
+WARMDOWN_RATIO = 0.35   # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
+DEPTH = 10              # number of transformer layers
 DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
@@ -470,9 +506,10 @@ def build_model_config(depth, vocab_size):
     base_dim = depth * ASPECT_RATIO
     model_dim = ((base_dim + HEAD_DIM - 1) // HEAD_DIM) * HEAD_DIM
     num_heads = model_dim // HEAD_DIM
+    n_kv_heads = max(1, num_heads // 4)
     return GPTConfig(
         sequence_len=MAX_SEQ_LEN, vocab_size=vocab_size,
-        n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
+        n_layer=depth, n_head=num_heads, n_kv_head=n_kv_heads, n_embd=model_dim,
         window_pattern=WINDOW_PATTERN,
     )
 
@@ -484,8 +521,9 @@ def get_lr_multiplier(progress):
     elif progress < 1.0 - WARMDOWN_RATIO:
         return 1.0
     else:
-        cooldown = (1.0 - progress) / WARMDOWN_RATIO
-        return cooldown * 1.0 + (1 - cooldown) * FINAL_LR_FRAC
+        decay_ratio = (progress - (1.0 - WARMDOWN_RATIO)) / WARMDOWN_RATIO
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return FINAL_LR_FRAC + coeff * (1.0 - FINAL_LR_FRAC)
 
 def get_muon_momentum(step):
     frac = min(step / 300, 1)
@@ -642,5 +680,47 @@ def train():
     print(f"num_params_M:     {num_params / 1e6:.1f}")
     print(f"depth:            {DEPTH}")
 
+    # Log experiment results
+    os.makedirs("experiments", exist_ok=True)
+    history_file = os.path.join("experiments", "history.json")
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_data = {
+        "timestamp": timestamp,
+        "val_bpb": val_bpb,
+        "training_seconds": total_training_time,
+        "total_seconds": t_end - t_start,
+        "peak_vram_mb": peak_vram_mb,
+        "mfu_percent": steady_state_mfu,
+        "total_tokens_M": total_tokens / 1e6,
+        "num_steps": step,
+        "num_params_M": num_params / 1e6,
+        "hyperparameters": {
+            "depth": DEPTH,
+            "warmup_ratio": WARMUP_RATIO,
+            "warmdown_ratio": WARMDOWN_RATIO,
+            "total_batch_size": TOTAL_BATCH_SIZE
+        }
+    }
+
+    with open(history_file, "a") as f:
+        f.write(json.dumps(experiment_data) + "\n")
+
+    shutil.copyfile(__file__, os.path.join("experiments", f"train_{timestamp}.py"))
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train GPT model")
+    parser.add_argument("--depth", type=int, default=DEPTH, help="Number of transformer layers")
+    parser.add_argument("--warmup_ratio", type=float, default=WARMUP_RATIO, help="Fraction of time budget for LR warmup")
+    parser.add_argument("--warmdown_ratio", type=float, default=WARMDOWN_RATIO, help="Fraction of time budget for LR warmdown")
+    parser.add_argument("--total_batch_size", type=int, default=TOTAL_BATCH_SIZE, help="Total batch size")
+
+    args = parser.parse_args()
+
+    # Override global variables with CLI arguments
+    DEPTH = args.depth
+    WARMUP_RATIO = args.warmup_ratio
+    WARMDOWN_RATIO = args.warmdown_ratio
+    TOTAL_BATCH_SIZE = args.total_batch_size
+
     train()

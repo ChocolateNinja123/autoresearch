@@ -81,10 +81,10 @@ def test_get_lr_multiplier_standard_schedule():
     assert get_lr_multiplier(0.5) == 1.0
     assert get_lr_multiplier(0.79) == 1.0
 
-    # Warmdown phase (0.8 to 1.0)
-    # At 0.8, cooldown = 1.0, multiplier = 1.0 * 1.0 + 0 * 0.1 = 1.0
-    # At 0.9, cooldown = 0.5, multiplier = 0.5 * 1.0 + 0.5 * 0.1 = 0.55
-    # At 1.0, cooldown = 0.0, multiplier = 0.0 * 1.0 + 1.0 * 0.1 = 0.1
+    # Warmdown phase (0.8 to 1.0) using cosine decay
+    # At 0.8, decay_ratio = 0.0 -> cos(0) = 1.0 -> coeff = 1.0 -> 1.0
+    # At 0.9, decay_ratio = 0.5 -> cos(pi/2) = 0.0 -> coeff = 0.5 -> 0.55
+    # At 1.0, decay_ratio = 1.0 -> cos(pi) = -1.0 -> coeff = 0.0 -> 0.1
     assert get_lr_multiplier(0.8) == pytest.approx(1.0)
     assert get_lr_multiplier(0.9) == pytest.approx(0.55)
     assert get_lr_multiplier(1.0) == pytest.approx(0.1)
@@ -98,7 +98,7 @@ def test_get_lr_multiplier_no_warmup():
     assert get_lr_multiplier(0.0) == pytest.approx(1.0)
     assert get_lr_multiplier(0.5) == pytest.approx(1.0)
 
-    # Warmdown phase (0.8 to 1.0)
+    # Warmdown phase (0.8 to 1.0) using cosine decay
     assert get_lr_multiplier(0.9) == pytest.approx(0.55)
     assert get_lr_multiplier(1.0) == pytest.approx(0.1)
 

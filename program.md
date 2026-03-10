@@ -29,8 +29,13 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+- **Do not change MAX_SEQ_LEN or total batch size if memory is limited.** VRAM is finite, respect the limits.
 
 **The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+
+**Experiment Priorities:**
+1. Focus on architectural changes first.
+2. Optimize hyperparameters once a promising architecture is established.
 
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
 
@@ -112,3 +117,12 @@ The idea is that you are a completely autonomous researcher trying things out. I
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
 As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+
+## What we already tried
+
+*Use this section to accumulate knowledge between sessions and prevent repeating failed experiments.*
+
+- **SwiGLU in MLP:** Replaced `relu().square()` with SwiGLU `silu(x) * gate`. Improved `val_bpb`.
+- **GQA:** Reduced `n_kv_head` to `max(1, n_head // 4)`. Reduced memory significantly without quality loss.
+- **Cosine Decay:** Used cosine decay instead of linear decay during the warmdown phase. Improved training dynamics.
+- **DEPTH/WARMUP/WARMDOWN:** Scaled up DEPTH from 8 to 10, increased WARMUP_RATIO from 0.0 to 0.05, and decreased WARMDOWN_RATIO from 0.5 to 0.35.
