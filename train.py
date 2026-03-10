@@ -346,7 +346,9 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
+_compile = torch.compile if platform.system() != "Windows" else lambda **kwargs: lambda f: f
+
+@_compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, buffers, hyperparams):
     exp_avg, exp_avg_sq = buffers
     step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t = hyperparams
@@ -359,7 +361,7 @@ def adamw_step_fused(p, grad, buffers, hyperparams):
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, buffers, hyperparams):
     momentum_buffer, second_momentum_buffer = buffers
     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim = hyperparams
