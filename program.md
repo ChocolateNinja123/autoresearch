@@ -2,6 +2,13 @@
 
 This is an experiment to have the LLM do its own research.
 
+## Platform
+
+- GPU: RTX 5060 8 ГБ (Blackwell, sm_120), Windows 11
+- Требуется PyTorch 2.7+ с CUDA 12.8
+- FA3 может быть недоступен — активен резервный вариант sdpa
+- Параметры по умолчанию: DEPTH=6, DEVICE_BATCH_SIZE=32, TOTAL_BATCH_SIZE=2**17, MAX_SEQ_LEN=1024
+
 ## Setup
 
 To set up a new experiment, work with the user to:

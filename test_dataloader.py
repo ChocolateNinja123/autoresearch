@@ -10,13 +10,14 @@ def mocked_empty(*args, **kwargs):
 
 torch.empty = mocked_empty
 
-tokenizer = prepare.Tokenizer.from_directory(prepare.TOKENIZER_DIR)
-dataloader = prepare.make_dataloader(tokenizer, B=4, T=128, split="train")
+def test_dataloader_basic():
+    tokenizer = prepare.Tokenizer.from_directory(prepare.TOKENIZER_DIR)
+    dataloader = prepare.make_dataloader(tokenizer, B=4, T=128, split="train")
 
-x, y, epoch = next(dataloader)
+    x, y, epoch = next(dataloader)
 
-print("x shape:", x.shape)
-print("y shape:", y.shape)
-print("epoch:", epoch)
-print("dataloader output x sum:", x.sum().item())
-print("dataloader output y sum:", y.sum().item())
+    assert x.shape == (4, 128)
+    assert y.shape == (4, 128)
+    assert epoch == 1
+    assert x.sum().item() > 0
+    assert y.sum().item() > 0
