@@ -16,6 +16,7 @@ import math
 import argparse
 import json
 import base64
+import subprocess
 from multiprocessing import Pool
 
 import requests
@@ -177,7 +178,7 @@ def _train_bpe_tokenizer(tokenizer_json):
     return enc
 
 
-def _build_token_bytes_lookup(enc, token_bytes_json):
+def _build_token_bytes_lookup(enc, token_bytes_pt):
     """Build and save token_bytes lookup table for BPB evaluation."""
     print("Tokenizer: building token_bytes lookup...")
     special_set = set(SPECIAL_TOKENS)
@@ -189,9 +190,10 @@ def _build_token_bytes_lookup(enc, token_bytes_json):
         else:
             token_bytes_list.append(len(token_str.encode("utf-8")))
 
-    with open(token_bytes_json, "w") as f:
-        json.dump(token_bytes_list, f)
-    print(f"Tokenizer: saved token_bytes to {token_bytes_json}")
+    token_bytes_tensor = torch.tensor(token_bytes_list, dtype=torch.int32)
+    with open(token_bytes_pt, "wb") as f:
+        torch.save(token_bytes_tensor, f)
+    print(f"Tokenizer: saved token_bytes to {token_bytes_pt}")
 
 
 def _run_sanity_check(enc):
@@ -206,9 +208,9 @@ def _run_sanity_check(enc):
 def train_tokenizer():
     """Train BPE tokenizer using rustbpe, save as JSON."""
     tokenizer_json = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-    token_bytes_json = os.path.join(TOKENIZER_DIR, "token_bytes.json")
+    token_bytes_pt = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
 
-    if os.path.exists(tokenizer_json) and os.path.exists(token_bytes_json):
+    if os.path.exists(tokenizer_json) and os.path.exists(token_bytes_pt):
         print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
         return
 
@@ -223,7 +225,7 @@ def train_tokenizer():
     enc = _train_bpe_tokenizer(tokenizer_json)
 
     # --- Build token_bytes lookup for BPB evaluation ---
-    _build_token_bytes_lookup(enc, token_bytes_json)
+    _build_token_bytes_lookup(enc, token_bytes_pt)
 
     # Sanity check
     _run_sanity_check(enc)
@@ -280,6 +282,9 @@ class Tokenizer:
 
 def get_token_bytes(device="cpu"):
     path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
+    if not os.path.exists(path):
+        print(f"Tokenizer: {path} not found. Running prepare.py...")
+        subprocess.run([sys.executable, "prepare.py"], check=True)
     with open(path, "rb") as f:
         return torch.load(f, map_location=device)
 

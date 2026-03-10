@@ -113,18 +113,25 @@ def test_get_token_bytes_normal(tmp_path):
         # Verify the contents match
         assert result.tolist() == expected_tensor.tolist()
 
-def test_get_token_bytes_file_not_found(tmp_path):
-    """Test get_token_bytes raises FileNotFoundError if token_bytes.pt is missing."""
+@patch("prepare.subprocess.run")
+def test_get_token_bytes_file_not_found_calls_prepare(mock_subprocess_run, tmp_path):
+    """Test get_token_bytes calls prepare.py if token_bytes.pt is missing."""
     mock_tokenizer_dir = tmp_path / "tokenizer"
     mock_tokenizer_dir.mkdir()
 
+    # The function will still raise FileNotFoundError because we mocked subprocess
+    # and didn't actually create the file, but we can verify it called subprocess.
     with patch("prepare.TOKENIZER_DIR", str(mock_tokenizer_dir)):
         with pytest.raises(FileNotFoundError):
             prepare.get_token_bytes(device="cpu")
 
+    import sys
+    mock_subprocess_run.assert_called_once_with([sys.executable, "prepare.py"], check=True)
+
+@patch("prepare.os.path.exists", return_value=True)
 @patch("prepare.torch.load")
 @patch("builtins.open")
-def test_get_token_bytes_mocked(mock_open, mock_torch_load):
+def test_get_token_bytes_mocked(mock_open, mock_torch_load, mock_exists):
     """Test get_token_bytes using mocks to verify internal calls."""
     mock_torch_load.return_value = "mock_tensor"
 
