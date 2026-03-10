@@ -14,6 +14,7 @@ import os
 import json
 import math
 import argparse
+import platform
 import shutil
 import datetime
 from dataclasses import dataclass, asdict
@@ -482,6 +483,7 @@ class MuonAdamW(torch.optim.Optimizer):
 ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = 128          # target head dimension for attention
 WINDOW_PATTERN = "SL" # sliding window pattern: L=full, S=half context
+NO_COMPILE = False    # skip torch.compile
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**17 # ~524K tokens per optimizer step
@@ -575,7 +577,12 @@ def train():
         weight_decay=WEIGHT_DECAY,
     )
 
-    model = torch.compile(model, dynamic=False)
+    if NO_COMPILE:
+        print("Skipping torch.compile (disabled via flag)")
+    elif platform.system() != "Windows":
+        model = torch.compile(model, dynamic=False)
+    else:
+        print("Windows detected: skipping torch.compile (Triton not supported)")
 
     train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
     x, y, epoch = next(train_loader)  # prefetch first batch
@@ -715,6 +722,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_ratio", type=float, default=WARMUP_RATIO, help="Fraction of time budget for LR warmup")
     parser.add_argument("--warmdown_ratio", type=float, default=WARMDOWN_RATIO, help="Fraction of time budget for LR warmdown")
     parser.add_argument("--total_batch_size", type=int, default=TOTAL_BATCH_SIZE, help="Total batch size")
+    parser.add_argument("--no-compile", action="store_true", help="Skip torch.compile")
 
     args = parser.parse_args()
 
@@ -723,5 +731,6 @@ if __name__ == "__main__":
     WARMUP_RATIO = args.warmup_ratio
     WARMDOWN_RATIO = args.warmdown_ratio
     TOTAL_BATCH_SIZE = args.total_batch_size
+    NO_COMPILE = args.no_compile
 
     train()
