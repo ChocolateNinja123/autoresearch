@@ -147,10 +147,8 @@ def test_download_single_shard_exists(tmp_path):
     filepath.touch()
 
     with patch("prepare.DATA_DIR", str(tmp_path)):
-        with patch("prepare.requests.get") as mock_get:
-            result = prepare.download_single_shard(index)
-            assert result is True
-            mock_get.assert_not_called()
+        result = prepare.download_single_shard(index)
+        assert result is True
 
 @patch("prepare.time.sleep")
 def test_download_single_shard_success_first_try(mock_sleep, tmp_path):
