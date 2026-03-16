@@ -71,7 +71,7 @@ def apply_rotary_emb(x, cos, sin):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config, layer_idx, window_size):
         super().__init__()
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
@@ -84,8 +84,10 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        self.window_size = window_size
+        self.register_buffer("attn_mask", torch.empty(0, 0, dtype=torch.bool), persistent=True)
 
-    def forward(self, x, ve, cos_sin, window_size):
+    def forward(self, x, ve, cos_sin):
         B, T, _ = x.size()
 
         qkv = self.c_qkv(x)
@@ -107,7 +109,7 @@ class CausalSelfAttention(nn.Module):
         q, k = norm(q), norm(k)
 
         if HAS_FA3:
-            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=self.window_size)
             y = y.contiguous().view(B, T, -1)
         else:
             # Fallback to SDPA
@@ -122,10 +124,14 @@ class CausalSelfAttention(nn.Module):
                 v = v.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).reshape(B, self.n_head, T, self.head_dim)
 
             # Handle window size
-            window_len = window_size[0]
+            window_len = self.window_size[0]
             if window_len < T and window_len > 0:
-                mask = torch.ones(T, T, dtype=torch.bool, device=q.device).tril(diagonal=0)
-                mask = torch.triu(mask, diagonal=-(window_len - 1))
+                if self.attn_mask.size(0) >= T:
+                    mask = self.attn_mask[:T, :T]
+                else:
+                    # Fallback for unexpected T > config.sequence_len
+                    mask = torch.ones(T, T, dtype=torch.bool, device=q.device).tril(diagonal=0)
+                    mask = torch.triu(mask, diagonal=-(window_len - 1))
                 y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
             else:
                 y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
@@ -151,13 +157,13 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config, layer_idx, window_size):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.attn = CausalSelfAttention(config, layer_idx, window_size)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
+    def forward(self, x, ve, cos_sin):
+        x = x + self.attn(norm(x), ve, cos_sin)
         x = x + self.mlp(norm(x))
         return x
 
@@ -169,7 +175,7 @@ class GPT(nn.Module):
         self.window_sizes = self._compute_window_sizes(config)
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
-            "h": nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
+            "h": nn.ModuleList([Block(config, i, self.window_sizes[i]) for i in range(config.n_layer)]),
         })
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
@@ -199,11 +205,17 @@ class GPT(nn.Module):
         # Transformer blocks
         n_embd = self.config.n_embd
         s = 3**0.5 * n_embd**-0.5
-        for block in self.transformer.h:
+        for i, block in enumerate(self.transformer.h):
             torch.nn.init.uniform_(block.attn.c_qkv.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            window_len = self.window_sizes[i][0]
+            if window_len < self.config.sequence_len and window_len > 0:
+                S = self.config.sequence_len
+                mask = torch.ones(S, S, dtype=torch.bool).tril(diagonal=0)
+                mask = torch.triu(mask, diagonal=-(window_len - 1))
+                block.attn.attn_mask = mask
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
@@ -320,7 +332,7 @@ class GPT(nn.Module):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve_idx = self.layer_to_ve_idx[i]
             ve = self.value_embeds[ve_idx](idx) if ve_idx != -1 else None
-            x = block(x, ve, cos_sin, self.window_sizes[i])
+            x = block(x, ve, cos_sin)
         x = norm(x)
 
         softcap = 15
