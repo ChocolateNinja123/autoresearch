@@ -140,7 +140,7 @@ def test_get_token_bytes_mocked(mock_open, mock_torch_load, mock_exists):
 
     expected_path = os.path.join("/mock/dir", "token_bytes.pt")
     mock_open.assert_called_once_with(expected_path, "rb")
-    mock_torch_load.assert_called_once_with(mock_open.return_value.__enter__(), map_location="cuda")
+    mock_torch_load.assert_called_once_with(mock_open.return_value.__enter__(), map_location="cuda", weights_only=True)
     assert result == "mock_tensor"
 
 import requests
