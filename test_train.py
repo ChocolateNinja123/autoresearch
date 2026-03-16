@@ -14,7 +14,7 @@ sys.modules['torch.nn.functional'] = mock_torch.nn.functional
 sys.modules['kernels'] = unittest.mock.MagicMock()
 sys.modules['prepare'] = unittest.mock.MagicMock()
 
-from train import has_ve, get_lr_multiplier, get_muon_momentum, get_weight_decay
+from train import has_ve, get_lr_multiplier, get_muon_momentum, get_weight_decay, norm
 
 def test_has_ve_even_layers():
     """Test has_ve with an even number of layers (e.g., n_layer=8)"""
@@ -269,3 +269,23 @@ def test_apply_rotary_emb_ndim_assertion():
 
     with pytest.raises(AssertionError):
         apply_rotary_emb(DummyTensor(5), DummyTensor(5), DummyTensor(5))
+
+def test_norm_mocked():
+    mock_torch_f = sys.modules['torch.nn.functional']
+
+    class DummyTensor:
+        def __init__(self, name, last_dim=768):
+            self.name = name
+            self.last_dim = last_dim
+
+        def size(self, dim):
+            if dim == -1:
+                return self.last_dim
+            return 1
+
+    x = DummyTensor("x", last_dim=512)
+
+    mock_torch_f.rms_norm.reset_mock()
+    norm(x)
+
+    mock_torch_f.rms_norm.assert_called_once_with(x, (512,))
