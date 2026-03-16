@@ -16,16 +16,6 @@ class MockTokenizer:
     def get_bos_token_id(self):
         return 0
 
-    def encode(self, text, prepend=None):
-        # text is a batch of strings, let's just pretend each string is a list of some tokens
-        res = []
-        for t in text:
-            toks = [ord(c) for c in t][:50] # max 50 tokens
-            if prepend is not None:
-                toks.insert(0, prepend)
-            res.append(toks)
-        return res
-
 # Mock the parquet reading part to just yield fast dummy data
 def mock_document_batches(split, tokenizer_batch_size=128):
     epoch = 1
