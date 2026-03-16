@@ -286,7 +286,7 @@ def get_token_bytes(device="cpu"):
         print(f"Tokenizer: {path} not found. Running prepare.py...")
         subprocess.run([sys.executable, "prepare.py"], check=True)
     with open(path, "rb") as f:
-        return torch.load(f, map_location=device)
+        return torch.load(f, map_location=device, weights_only=True)
 
 
 def _document_batches(split, tokenizer_batch_size=128):
